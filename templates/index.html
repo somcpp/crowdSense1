@@ -15,7 +15,81 @@
         h1 {
             text-align: center;
             color: #2c3e50;
-            margin-bottom: 30px;
+            margin-bottom: 20px;
+        }
+        .source-controls {
+            max-width: 1200px;
+            margin: 0 auto 20px;
+            background-color: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .upload-form {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+        }
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            flex: 1;
+            min-width: 250px;
+        }
+        .file-input-wrapper input[type=file] {
+            font-size: 100px;
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .file-input-button {
+            background-color: #3498db;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            width: 100%;
+            text-align: center;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .file-input-button:hover {
+            background-color: #2980b9;
+        }
+        .upload-submit, .webcam-button {
+            background-color: #2ecc71;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .upload-submit:hover {
+            background-color: #27ae60;
+        }
+        .webcam-button {
+            background-color: #e74c3c;
+        }
+        .webcam-button:hover {
+            background-color: #c0392b;
+        }
+        .source-info {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #7f8c8d;
         }
         .container {
             display: flex;
@@ -82,19 +156,50 @@
             margin-top: 0;
             color: #3498db;
         }
-        .people-count {
-            text-align: center;
-            font-size: 1.2rem;
-            margin-top: 15px;
-            font-weight: 500;
-            background-color: #e8f4fd;
-            padding: 8px;
-            border-radius: 6px;
+        .selected-file {
+            margin-left: 15px;
+            font-style: italic;
+            color: #7f8c8d;
+        }
+        .file-name {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        .loading {
+            display: none;
+            margin-left: 10px;
+        }
+        @media (max-width: 768px) {
+            .source-controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .file-input-wrapper {
+                width: 100%;
+            }
         }
     </style>
 </head>
 <body>
     <h1>People Detection & Activity Heatmap</h1>
+    
+    <div class="source-controls">
+        <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
+            <div class="file-input-wrapper">
+                <button class="file-input-button" type="button">Choose Video File</button>
+                <input type="file" name="video" id="videoFile" accept=".mp4,.avi,.mov,.mkv,.webm">
+            </div>
+            <button type="submit" class="upload-submit" id="uploadButton">Upload & Process Video</button>
+            <div class="loading" id="loadingIndicator">Processing...</div>
+            <div class="selected-file" id="selectedFile"></div>
+        </form>
+        <a href="/use_webcam"><button class="webcam-button">Use Webcam</button></a>
+    </div>
+    
     <div class="container">
         <div class="video-container">
             <h3 class="feed-title">Live Person Detection</h3>
@@ -109,30 +214,52 @@
             </div>
         </div>
     </div>
+    
     <div class="info-section">
         <h3>System Information</h3>
         <div class="info-grid">
             <div class="info-card">
                 <h4>How It Works</h4>
-                <p>This system uses YOLOv8 to detect people in real-time from your webcam. The frame is divided into {{GRID_ROWS}}×{{GRID_COLS}} cells, and the heatmap shows the density of detected people in each area.</p>
+                <p>This system uses YOLOv8 to detect people in real-time from your webcam or uploaded video. The frame is divided into {{GRID_ROWS}}×{{GRID_COLS}} cells, and the heatmap shows the density of detected people in each area.</p>
             </div>
             <div class="info-card">
-                <h4>Heatmap Colors</h4>
-                <p>The heatmap uses a color gradient from green (low activity) through yellow and orange to red (high activity), showing where people are concentrated in the frame.</p>
+                <h4>Supported Video Formats</h4>
+                <p>You can upload .mp4, .avi, .mov, .mkv and .webm video files (max 100MB). The system will analyze the video and display both person detection results and the activity heatmap.</p>
             </div>
         </div>
     </div>
 
     <script>
+        // File input handling
+        const fileInput = document.getElementById('videoFile');
+        const selectedFile = document.getElementById('selectedFile');
+        const fileButton = document.querySelector('.file-input-button');
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadButton = document.getElementById('uploadButton');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        
+        fileInput.addEventListener('change', function() {
+            if (this.files.length > 0) {
+                const fileName = this.files[0].name;
+                fileButton.textContent = 'File Selected';
+                selectedFile.innerHTML = 'Selected: <span class="file-name">' + fileName + '</span>';
+            } else {
+                fileButton.textContent = 'Choose Video File';
+                selectedFile.textContent = '';
+            }
+        });
+        
+        uploadForm.addEventListener('submit', function() {
+            uploadButton.disabled = true;
+            loadingIndicator.style.display = 'inline';
+        });
+        
         // This script will periodically update the people count information
         function updatePeopleCount() {
             fetch('/heatmap_data')
                 .then(response => response.json())
                 .then(data => {
-                    const peopleCountElement = document.getElementById('people-count');
-                    if (peopleCountElement) {
-                        peopleCountElement.textContent = data.people_count;
-                    }
+                    console.log('People count updated:', data.people_count);
                 });
         }
         

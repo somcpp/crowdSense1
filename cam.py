@@ -1,19 +1,36 @@
 from ultralytics import YOLO
 import cv2
 import numpy as np
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, render_template, Response, jsonify, request, redirect, url_for
 import time
+import os
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+# Configure upload settings
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max upload size
+
+# Create uploads directory if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Load the YOLOv8 model
 model = YOLO("yolov8n.pt")
+
+# Global video source flag and path
+using_webcam = True
+video_path = "uploads/videoplayback (1).mp4"
+
+# Initialize webcam
 cap = cv2.VideoCapture(0)
 
-# Increase grid resolution for better heatmap visualization
+# Heatmap configuration
 GRID_ROWS = 8
 GRID_COLS = 8
 grid_counts = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
-
-# For stability, we'll use a moving average
 SMOOTHING_FACTOR = 0.3  # Lower values = more smoothing
 smoothed_grid = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 total_people_count = 0
@@ -21,18 +38,58 @@ total_people_count = 0
 # Class index for 'person' in COCO dataset (used by YOLOv8)
 PERSON_CLASS_ID = 0
 
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 def generate_frames():
-    global grid_counts, smoothed_grid, total_people_count
+    global grid_counts, smoothed_grid, total_people_count, cap, using_webcam, video_path
+    
     last_update_time = time.time()
+    
+    # If video file was uploaded and we're not using webcam
+    if not using_webcam and video_path:
+        # Release current video source if any
+        if cap is not None:
+            cap.release()
+        # Open the uploaded video file
+        cap = cv2.VideoCapture(video_path)
+    
+    # Make sure we have a valid video source
+    if not cap.isOpened():
+        if using_webcam:
+            # Try to open the webcam
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + 
+                       cv2.imencode('.jpg', np.zeros((480, 640, 3), dtype=np.uint8))[1].tobytes() + 
+                       b'\r\n')
+                return
+        else:
+            # Invalid video file
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + 
+                   cv2.imencode('.jpg', np.zeros((480, 640, 3), dtype=np.uint8))[1].tobytes() + 
+                   b'\r\n')
+            return
     
     while True:
         success, frame = cap.read()
+        
+        # If end of video, loop back to beginning for uploaded videos
         if not success:
-            continue
+            if not using_webcam and video_path:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to beginning of video
+                success, frame = cap.read()
+                if not success:
+                    break
+            else:
+                # For webcam, just try to get the next frame
+                continue
             
         height, width, _ = frame.shape
         cell_h = height // GRID_ROWS
-        cell_w = width // GRID_COLS 
+        cell_w = width // GRID_COLS
         
         # Limit updates to reduce flickering (process every 100ms)
         current_time = time.time()
@@ -92,12 +149,23 @@ def generate_frames():
         cv2.putText(frame, f"People Count: {total_people_count}", 
                    (10, height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
+        # Add source indicator
+        source_text = "Source: Webcam" if using_webcam else f"Source: Video - {os.path.basename(video_path)}"
+        cv2.putText(frame, source_text, 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(frame, source_text, 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        
         # Convert the frame to JPEG
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_bytes = buffer.tobytes()
         
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        # Add a small delay to control frame rate for uploaded videos
+        if not using_webcam:
+            time.sleep(0.03)  # ~30fps
 
 def generate_heatmap():
     global smoothed_grid
@@ -217,6 +285,58 @@ def heatmap_data():
         'grid': smoothed_grid,
         'people_count': total_people_count
     })
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    global using_webcam, video_path
+    
+    # Check if a file was submitted
+    if 'video' not in request.files:
+        return redirect(request.url)
+    
+    file = request.files['video']
+    
+    # If user submits empty form
+    if file.filename == '':
+        return redirect(request.url)
+    
+    # If valid file and allowed extension
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Remove old uploaded files to save space (optional)
+        for old_file in os.listdir(app.config['UPLOAD_FOLDER']):
+            old_path = os.path.join(app.config['UPLOAD_FOLDER'], old_file)
+            if os.path.isfile(old_path):
+                os.unlink(old_path)
+        
+        # Save the new file
+        file.save(file_path)
+        
+        # Set the video path and flag
+        video_path = file_path
+        using_webcam = False
+        
+        return redirect(url_for('home'))
+    
+    return redirect(request.url)
+
+@app.route('/use_webcam')
+def use_webcam():
+    global using_webcam, cap
+    
+    # Switch to webcam mode
+    using_webcam = True
+    
+    # Release current video if not webcam
+    if cap is not None:
+        cap.release()
+    
+    # Open webcam
+    cap = cv2.VideoCapture(0)
+    
+    return redirect(url_for('home'))
 
 if __name__ == "__main__":
     app.run(debug=True)
