@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>People Detection Heatmap</title>
+    <title>Crowd Density Monitor</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -173,6 +173,35 @@
             display: none;
             margin-left: 10px;
         }
+        .people-counter {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 20px;
+            border-radius: 10px;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            font-weight: bold;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            min-width: 180px;
+            z-index: 10;
+            transition: all 0.3s ease;
+        }
+        .people-counter.low {
+            background-color: rgba(46, 204, 113, 0.8);
+        }
+        .people-counter.medium {
+            background-color: rgba(241, 196, 15, 0.8);
+        }
+        .people-counter.high {
+            background-color: rgba(231, 76, 60, 0.8);
+        }
+        #densityIndicator {
+            margin-top: 5px;
+            font-size: 0.9em;
+        }
         @media (max-width: 768px) {
             .source-controls {
                 flex-direction: column;
@@ -185,7 +214,7 @@
     </style>
 </head>
 <body>
-    <h1>People Detection & Activity Heatmap</h1>
+    <h1>Crowd Density Monitor</h1>
     
     <div class="source-controls">
         <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -205,10 +234,14 @@
             <h3 class="feed-title">Live Person Detection</h3>
             <div class="feed-content">
                 <img src="{{ url_for('video_feed') }}" alt="Video Feed">
+                <div class="people-counter low" id="peopleCounter">
+                    <div id="countDisplay">People: 0</div>
+                    <div id="densityIndicator">Low Density</div>
+                </div>
             </div>
         </div>
         <div class="heatmap-container">
-            <h3 class="feed-title">Activity Heatmap</h3>
+            <h3 class="feed-title">Density Heatmap</h3>
             <div class="feed-content">
                 <img src="{{ url_for('heatmap_feed') }}" alt="Heatmap Feed">
             </div>
@@ -220,7 +253,11 @@
         <div class="info-grid">
             <div class="info-card">
                 <h4>How It Works</h4>
-                <p>This system uses YOLOv8 to detect people in real-time from your webcam or uploaded video. The frame is divided into {{GRID_ROWS}}×{{GRID_COLS}} cells, and the heatmap shows the density of detected people in each area.</p>
+                <p>This system uses YOLOv8 to detect people in real-time from your webcam or uploaded video. The smooth gradient heatmap shows crowd density using weather map-style visualization, transitioning from blue (low) to red (high density).</p>
+            </div>
+            <div class="info-card">
+                <h4>Crowd Monitoring</h4>
+                <p>The color of the people counter changes based on crowd density: green for low density, yellow/orange for medium, and red for high density areas. This provides an instant visual indication of crowd levels.</p>
             </div>
             <div class="info-card">
                 <h4>Supported Video Formats</h4>
@@ -237,6 +274,9 @@
         const uploadForm = document.getElementById('uploadForm');
         const uploadButton = document.getElementById('uploadButton');
         const loadingIndicator = document.getElementById('loadingIndicator');
+        const peopleCounter = document.getElementById('peopleCounter');
+        const countDisplay = document.getElementById('countDisplay');
+        const densityIndicator = document.getElementById('densityIndicator');
         
         fileInput.addEventListener('change', function() {
             if (this.files.length > 0) {
@@ -254,17 +294,43 @@
             loadingIndicator.style.display = 'inline';
         });
         
-        // This script will periodically update the people count information
+        // This script will periodically update the people count information and density color
         function updatePeopleCount() {
             fetch('/heatmap_data')
                 .then(response => response.json())
                 .then(data => {
-                    console.log('People count updated:', data.people_count);
-                });
+                    // Update the count display
+                    countDisplay.textContent = `People: ${data.people_count}`;
+                    
+                    // Update density indicator text
+                    let densityText = "Low Density";
+                    
+                    // Remove all classes first
+                    peopleCounter.classList.remove('low', 'medium', 'high');
+                    
+                    // Add appropriate class based on density level
+                    switch(data.density_level) {
+                        case 'low':
+                            densityText = "Low Density";
+                            peopleCounter.classList.add('low');
+                            break;
+                        case 'medium':
+                            densityText = "Medium Density";
+                            peopleCounter.classList.add('medium');
+                            break;
+                        case 'high':
+                            densityText = "High Density";
+                            peopleCounter.classList.add('high');
+                            break;
+                    }
+                    
+                    densityIndicator.textContent = densityText;
+                })
+                .catch(error => console.error('Error fetching heatmap data:', error));
         }
         
-        // Update every 2 seconds
-        setInterval(updatePeopleCount, 2000);
+        // Update every second
+        setInterval(updatePeopleCount, 1000);
     </script>
 </body>
 </html>

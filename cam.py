@@ -27,13 +27,18 @@ video_path = "uploads/videoplayback (1).mp4"
 # Initialize webcam
 cap = cv2.VideoCapture(0)
 
-# Heatmap configuration
-GRID_ROWS = 8
-GRID_COLS = 8
+# Heatmap configuration - increased resolution for smoother gradients
+GRID_ROWS = 32  # Increased from 8 for smoother gradient
+GRID_COLS = 32  # Increased from 8 for smoother gradient
 grid_counts = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 SMOOTHING_FACTOR = 0.3  # Lower values = more smoothing
 smoothed_grid = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 total_people_count = 0
+
+# Crowd density thresholds (adjust based on your needs)
+LOW_THRESHOLD = 3
+MEDIUM_THRESHOLD = 8
+HIGH_THRESHOLD = 15
 
 # Class index for 'person' in COCO dataset (used by YOLOv8)
 PERSON_CLASS_ID = 0
@@ -168,7 +173,7 @@ def generate_frames():
             time.sleep(0.03)  # ~30fps
 
 def generate_heatmap():
-    global smoothed_grid
+    global smoothed_grid, total_people_count
     while True:
         time.sleep(0.1)  # Slow down updates to reduce flickering
         
@@ -186,78 +191,138 @@ def generate_heatmap():
         if max_count < 0.1:  # Avoid division by near-zero
             max_count = 0.1
             
-        # Fill the entire heatmap with green (base color when no people)
-        heatmap[:, :] = (0, 180, 0)  # Green background
+        # Fill the entire heatmap with dark blue (base color when no people)
+        heatmap[:, :] = (100, 0, 0)  # Dark blue background (BGR)
         
-        # Draw the heatmap cells
+        # Create a blank base for the heatmap
+        base_heatmap = np.zeros((heatmap_height, heatmap_width), dtype=np.float32)
+        
+        # Fill the base heatmap with intensity values
         for row in range(GRID_ROWS):
             for col in range(GRID_COLS):
-                # Normalize count to get color intensity (0-1)
-                intensity = min(1.0, smoothed_grid[row][col] / max_count)
-                
+                if smoothed_grid[row][col] > 0.01:
+                    # Determine area to affect with Gaussian distribution (smoother effect)
+                    y_center = int((row + 0.5) * cell_h)
+                    x_center = int((col + 0.5) * cell_w)
+                    
+                    # Intensity based on normalized value
+                    intensity = min(1.0, smoothed_grid[row][col] / max_count)
+                    
+                    # Apply Gaussian blob to create smooth transitions (Weather-map like effect)
+                    # The sigma controls the spread - larger values create more spread
+                    sigma = max(cell_h, cell_w) * 0.5  # Adjust for desired spread
+                    
+                    # Create a weighted Gaussian blob
+                    y, x = np.ogrid[-y_center:heatmap_height-y_center, -x_center:heatmap_width-x_center]
+                    mask = np.exp(-(x*x + y*y) / (2*sigma*sigma))
+                    
+                    # Apply the weighted mask to the base heatmap
+                    base_heatmap = np.maximum(base_heatmap, mask * intensity)
+        
+        # Apply colormap to the base heatmap
+        # Map values from 0-1 to appropriate colors (blue to green to yellow to red)
+        for y in range(heatmap_height):
+            for x in range(heatmap_width):
+                intensity = base_heatmap[y, x]
                 if intensity > 0.01:  # Only color cells with some activity
-                    # Create a smooth gradient from green (no people) to red (many people)
-                    # BGR: Green (0,180,0) → Yellow (0,180,180) → Orange (0,100,200) → Red (0,0,255)
-                    if intensity < 0.3:
+                    # Create a smooth gradient from blue (low) to green to yellow to red (high)
+                    # BGR format
+                    if intensity < 0.25:
+                        # Blue to Cyan
+                        g_value = int(255 * (intensity / 0.25))
+                        color = (255, g_value, 0)  # BGR
+                    elif intensity < 0.5:
+                        # Cyan to Green
+                        b_value = int(255 - 255 * ((intensity - 0.25) / 0.25))
+                        color = (b_value, 255, 0)  # BGR
+                    elif intensity < 0.75:
                         # Green to Yellow
-                        b_value = int(180 * (intensity / 0.3))
-                        color = (b_value, 180, 0)  # BGR format
-                    elif intensity < 0.6:
-                        # Yellow to Orange
-                        adjusted = (intensity - 0.3) / 0.3
-                        g_value = int(180 - 80 * adjusted)
-                        b_value = int(180 + (200 - 180) * adjusted)
-                        color = (b_value, g_value, 0)  # BGR format
+                        r_value = int(255 * ((intensity - 0.5) / 0.25))
+                        color = (0, 255, r_value)  # BGR
                     else:
-                        # Orange to Red
-                        adjusted = (intensity - 0.6) / 0.4
-                        g_value = int(100 - 100 * adjusted)
-                        color = (255, g_value, 0)  # BGR format
+                        # Yellow to Red
+                        g_value = int(255 - 255 * ((intensity - 0.75) / 0.25))
+                        color = (0, g_value, 255)  # BGR
                     
-                    # Calculate the exact pixel coordinates for this cell
-                    y1 = row * cell_h
-                    y2 = (row + 1) * cell_h
-                    x1 = col * cell_w
-                    x2 = (col + 1) * cell_w
-                    
-                    # Fill the cell with the color
-                    cv2.rectangle(heatmap, (x1, y1), (x2, y2), color, -1)
+                    # Apply color to the heatmap
+                    heatmap[y, x] = color
         
-        # Draw consistent, subtle grid lines as a separate overlay
-        grid_color = (70, 70, 70)  # Dark gray, slightly visible
-        grid_alpha = 0.15  # Very transparent
+        # Apply mild Gaussian blur for even smoother transitions
+        heatmap = cv2.GaussianBlur(heatmap, (5, 5), 0)
         
-        # Create a grid overlay
-        grid_overlay = np.zeros_like(heatmap, dtype=np.float32)
-        
-        # Draw horizontal grid lines
-        for i in range(1, GRID_ROWS):
-            y = i * cell_h
-            cv2.line(grid_overlay, (0, y), (heatmap_width, y), (1, 1, 1), 1)
-            
-        # Draw vertical grid lines
-        for i in range(1, GRID_COLS):
-            x = i * cell_w
-            cv2.line(grid_overlay, (x, 0), (x, heatmap_height), (1, 1, 1), 1)
-            
-        # Apply the grid overlay with transparency
-        heatmap = cv2.addWeighted(heatmap, 1, grid_overlay.astype(np.uint8) * 255, grid_alpha, 0)
-        
-        # Add a title with the total people count
-        cv2.putText(heatmap, f"Person Activity Heatmap", 
+        # Add a title
+        cv2.putText(heatmap, f"Activity Heatmap", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Add legend
-        legend_y = heatmap_height - 60
-        # Green (low)
-        cv2.rectangle(heatmap, (10, legend_y), (30, legend_y + 20), (0, 180, 0), -1)
-        cv2.putText(heatmap, "Low", (35, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        # Yellow (medium)
-        cv2.rectangle(heatmap, (80, legend_y), (100, legend_y + 20), (180, 180, 0), -1)
-        cv2.putText(heatmap, "Medium", (105, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        # Red (high)
-        cv2.rectangle(heatmap, (180, legend_y), (200, legend_y + 20), (255, 0, 0), -1)
-        cv2.putText(heatmap, "High", (205, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Determine crowd density level and color for count box
+        if total_people_count < LOW_THRESHOLD:
+            density_text = "Low Density"
+            count_color = (0, 255, 0)  # Green for low (BGR)
+        elif total_people_count < MEDIUM_THRESHOLD:
+            density_text = "Medium Density"
+            count_color = (0, 165, 255)  # Orange for medium (BGR)
+        else:
+            density_text = "High Density"
+            count_color = (0, 0, 255)  # Red for high (BGR)
+            
+        # Add a box with people count that changes color based on density
+        count_box_y1 = heatmap_height - 80
+        count_box_y2 = heatmap_height - 20
+        count_box_x1 = heatmap_width // 2 - 100
+        count_box_x2 = heatmap_width // 2 + 100
+        
+        # Draw semi-transparent background
+        overlay = heatmap.copy()
+        cv2.rectangle(overlay, (count_box_x1, count_box_y1), (count_box_x2, count_box_y2), count_color, -1)
+        cv2.addWeighted(overlay, 0.7, heatmap, 0.3, 0, heatmap)
+        
+        # Draw border
+        cv2.rectangle(heatmap, (count_box_x1, count_box_y1), (count_box_x2, count_box_y2), (255, 255, 255), 2)
+        
+        # Add count text
+        cv2.putText(heatmap, f"Total People: {total_people_count}", 
+                   (count_box_x1 + 10, count_box_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(heatmap, density_text, 
+                   (count_box_x1 + 10, count_box_y1 + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Add a small gradient legend
+        legend_height = 20
+        legend_width = 200
+        legend_x = 20
+        legend_y = heatmap_height - 120
+        
+        # Create gradient for legend
+        legend = np.zeros((legend_height, legend_width, 3), dtype=np.uint8)
+        for x in range(legend_width):
+            ratio = x / legend_width
+            if ratio < 0.25:
+                # Blue to Cyan
+                g_value = int(255 * (ratio / 0.25))
+                color = (255, g_value, 0)  # BGR
+            elif ratio < 0.5:
+                # Cyan to Green
+                b_value = int(255 - 255 * ((ratio - 0.25) / 0.25))
+                color = (b_value, 255, 0)  # BGR
+            elif ratio < 0.75:
+                # Green to Yellow
+                r_value = int(255 * ((ratio - 0.5) / 0.25))
+                color = (0, 255, r_value)  # BGR
+            else:
+                # Yellow to Red
+                g_value = int(255 - 255 * ((ratio - 0.75) / 0.25))
+                color = (0, g_value, 255)  # BGR
+            
+            # Fill the column with the color
+            legend[:, x] = color
+        
+        # Add the legend to the heatmap
+        heatmap[legend_y:legend_y+legend_height, legend_x:legend_x+legend_width] = legend
+        
+        # Legend labels
+        cv2.putText(heatmap, "Low", (legend_x, legend_y - 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(heatmap, "High", (legend_x + legend_width - 30, legend_y - 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
         ret, buffer = cv2.imencode('.jpg', heatmap)
         heatmap_bytes = buffer.tobytes()
@@ -281,9 +346,18 @@ def heatmap_feed():
 
 @app.route('/heatmap_data')
 def heatmap_data():
+    # Determine crowd density level
+    if total_people_count < LOW_THRESHOLD:
+        density_level = "low"
+    elif total_people_count < MEDIUM_THRESHOLD:
+        density_level = "medium"
+    else:
+        density_level = "high"
+    
     return jsonify({
         'grid': smoothed_grid,
-        'people_count': total_people_count
+        'people_count': total_people_count,
+        'density_level': density_level
     })
 
 @app.route('/upload', methods=['POST'])
