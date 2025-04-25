@@ -36,18 +36,72 @@ smoothed_grid = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 total_people_count = 0
 
 # Crowd density thresholds (adjust based on your needs)
-LOW_THRESHOLD = 3
-MEDIUM_THRESHOLD = 8
-HIGH_THRESHOLD = 15
+LOW_THRESHOLD = 8
+MEDIUM_THRESHOLD = 12
+HIGH_THRESHOLD = 14
 
 # Class index for 'person' in COCO dataset (used by YOLOv8)
 PERSON_CLASS_ID = 0
 
+# Zone definitions - define zones as rectangles [x1, y1, x2, y2]
+# Coordinates are normalized (0.0-1.0) to be resolution-independent
+zones = {
+    'A': {'coords': [0.0, 0.0, 0.33, 1.0], 'color': (0, 0, 255), 'count': 0, 'density': 'low'},  # Left zone (red)
+    'B': {'coords': [0.33, 0.0, 0.66, 1.0], 'color': (0, 255, 0), 'count': 0, 'density': 'low'},  # Middle zone (green)
+    'C': {'coords': [0.66, 0.0, 1.0, 1.0], 'color': (255, 0, 0), 'count': 0, 'density': 'low'}   # Right zone (blue)
+}
+
+# To store movement recommendations
+movement_recommendations = []
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def calculate_zone_densities():
+    """Calculate crowd density for each zone and generate movement recommendations"""
+    global zones, movement_recommendations
+    
+    # Reset recommendations
+    movement_recommendations = []
+    
+    # First determine density levels for each zone
+    for zone_id, zone in zones.items():
+        people_count = zone['count']
+        if people_count < LOW_THRESHOLD:
+            zone['density'] = 'low'
+        elif people_count < MEDIUM_THRESHOLD:
+            zone['density'] = 'medium'
+        else:
+            zone['density'] = 'high'
+    
+    # Generate movement recommendations based on density differences
+    high_density_zones = []
+    low_density_zones = []
+    
+    for zone_id, zone in zones.items():
+        if zone['density'] == 'high':
+            high_density_zones.append(zone_id)
+        elif zone['density'] == 'low':
+            low_density_zones.append(zone_id)
+    
+    # Generate recommendations from high to low density zones
+    for high_zone in high_density_zones:
+        for low_zone in low_density_zones:
+            if high_zone != low_zone:
+                recommendation = f"Move from Zone {high_zone} to Zone {low_zone}"
+                movement_recommendations.append(recommendation)
+    
+    # If no clear recommendations (all zones similar density)
+    if not movement_recommendations:
+        if all(zone['density'] == 'high' for zone in zones.values()):
+            movement_recommendations.append("All zones at capacity. Consider opening new areas.")
+        elif all(zone['density'] == 'low' for zone in zones.values()):
+            movement_recommendations.append("All zones have low occupancy. No movement needed.")
+        else:
+            movement_recommendations.append("Crowd distribution is balanced across zones.")
+
 def generate_frames():
-    global grid_counts, smoothed_grid, total_people_count, cap, using_webcam, video_path
+    global grid_counts, smoothed_grid, total_people_count, cap, using_webcam, video_path, zones
     
     last_update_time = time.time()
     
@@ -99,8 +153,10 @@ def generate_frames():
         # Limit updates to reduce flickering (process every 100ms)
         current_time = time.time()
         if current_time - last_update_time > 0.1:
-            # Reset grid counts for each frame
+            # Reset grid counts and zone counts for each frame
             grid_counts = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+            for zone_id in zones:
+                zones[zone_id]['count'] = 0
             
             # Detect objects
             results = model(frame)
@@ -122,6 +178,20 @@ def generate_frames():
                         cx = int((x1 + x2) / 2)
                         cy = int((y1 + y2) / 2)
                         
+                        # Check which zone the person is in
+                        person_added_to_zone = False
+                        for zone_id, zone_info in zones.items():
+                            # Convert normalized coordinates to actual pixel values
+                            zone_x1 = int(zone_info['coords'][0] * width)
+                            zone_y1 = int(zone_info['coords'][1] * height)
+                            zone_x2 = int(zone_info['coords'][2] * width)
+                            zone_y2 = int(zone_info['coords'][3] * height)
+                            
+                            # Check if person center is within this zone
+                            if zone_x1 <= cx <= zone_x2 and zone_y1 <= cy <= zone_y2:
+                                zones[zone_id]['count'] += 1
+                                person_added_to_zone = True
+                        
                         # Determine which grid cell the center falls into
                         row = min(cy // cell_h, GRID_ROWS - 1)
                         col = min(cx // cell_w, GRID_COLS - 1)
@@ -142,6 +212,9 @@ def generate_frames():
             # Update total people count with the current frame count
             total_people_count = frame_people_count
             
+            # Calculate crowd density for each zone
+            calculate_zone_densities()
+            
             # Update smoothed grid with new counts (exponential moving average)
             for r in range(GRID_ROWS):
                 for c in range(GRID_COLS):
@@ -151,8 +224,51 @@ def generate_frames():
             last_update_time = current_time
         
         # Add people count to the frame
-        cv2.putText(frame, f"People Count: {total_people_count}", 
+        cv2.putText(frame, f"Total People: {total_people_count}", 
                    (10, height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Draw zone boundaries and add count labels
+        for zone_id, zone_info in zones.items():
+            # Convert normalized coordinates to actual pixel values
+            x1 = int(zone_info['coords'][0] * width)
+            y1 = int(zone_info['coords'][1] * height)
+            x2 = int(zone_info['coords'][2] * width)
+            y2 = int(zone_info['coords'][3] * height)
+            
+            # Get density-based color (red for high, yellow for medium, green for low)
+            if zone_info['density'] == 'high':
+                density_color = (0, 0, 255)  # Red (BGR)
+            elif zone_info['density'] == 'medium':
+                density_color = (0, 165, 255)  # Orange (BGR)
+            else:
+                density_color = (0, 255, 0)  # Green (BGR)
+            
+            # Draw translucent zone overlay
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), zone_info['color'], -1)
+            cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)  # Make overlay translucent
+            
+            # Draw zone border
+            cv2.rectangle(frame, (x1, y1), (x2, y2), zone_info['color'], 2)
+            
+            # Add zone label and count
+            label_bg_y1 = y1 + 5
+            label_bg_y2 = y1 + 65
+            label_bg_x1 = x1 + 5
+            label_bg_x2 = x1 + 140
+            
+            # Semi-transparent background for label
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (label_bg_x1, label_bg_y1), (label_bg_x2, label_bg_y2), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+            
+            # Add text
+            cv2.putText(frame, f"Zone {zone_id}", (label_bg_x1 + 5, label_bg_y1 + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(frame, f"Count: {zone_info['count']}", (label_bg_x1 + 5, label_bg_y1 + 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(frame, f"{zone_info['density'].capitalize()}", (label_bg_x1 + 5, label_bg_y1 + 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, density_color, 2)
         
         # Add source indicator
         source_text = "Source: Webcam" if using_webcam else f"Source: Video - {os.path.basename(video_path)}"
@@ -173,7 +289,7 @@ def generate_frames():
             time.sleep(0.03)  # ~30fps
 
 def generate_heatmap():
-    global smoothed_grid, total_people_count
+    global smoothed_grid, total_people_count, zones, movement_recommendations
     while True:
         time.sleep(0.1)  # Slow down updates to reduce flickering
         
@@ -254,15 +370,30 @@ def generate_heatmap():
         cv2.putText(heatmap, f"Activity Heatmap", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
+        # Draw zone boundaries on heatmap
+        for zone_id, zone_info in zones.items():
+            # Convert normalized coordinates to actual pixel values
+            x1 = int(zone_info['coords'][0] * heatmap_width)
+            y1 = int(zone_info['coords'][1] * heatmap_height)
+            x2 = int(zone_info['coords'][2] * heatmap_width)
+            y2 = int(zone_info['coords'][3] * heatmap_height)
+            
+            # Draw zone border
+            cv2.rectangle(heatmap, (x1, y1), (x2, y2), (255, 255, 255), 2)
+            
+            # Add zone label
+            cv2.putText(heatmap, f"Zone {zone_id}", (x1 + 5, y1 + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
         # Determine crowd density level and color for count box
         if total_people_count < LOW_THRESHOLD:
-            density_text = "Low Density"
+            density_text = "Low Overall Density"
             count_color = (0, 255, 0)  # Green for low (BGR)
         elif total_people_count < MEDIUM_THRESHOLD:
-            density_text = "Medium Density"
+            density_text = "Medium Overall Density"
             count_color = (0, 165, 255)  # Orange for medium (BGR)
         else:
-            density_text = "High Density"
+            density_text = "High Overall Density"
             count_color = (0, 0, 255)  # Red for high (BGR)
             
         # Add a box with people count that changes color based on density
@@ -324,6 +455,36 @@ def generate_heatmap():
         cv2.putText(heatmap, "High", (legend_x + legend_width - 30, legend_y - 5), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
+        # Add movement recommendations box
+        if movement_recommendations:
+            recommend_box_y1 = 60
+            recommend_box_x1 = 20
+            recommend_box_width = heatmap_width - 40
+            recommend_box_height = 30 + (len(movement_recommendations) * 25)
+            recommend_box_y2 = recommend_box_y1 + recommend_box_height
+            recommend_box_x2 = recommend_box_x1 + recommend_box_width
+            
+            # Draw semi-transparent background
+            overlay = heatmap.copy()
+            cv2.rectangle(overlay, (recommend_box_x1, recommend_box_y1), 
+                         (recommend_box_x2, recommend_box_y2), (0, 0, 128), -1)
+            cv2.addWeighted(overlay, 0.7, heatmap, 0.3, 0, heatmap)
+            
+            # Draw border
+            cv2.rectangle(heatmap, (recommend_box_x1, recommend_box_y1), 
+                         (recommend_box_x2, recommend_box_y2), (255, 255, 255), 2)
+            
+            # Add title
+            cv2.putText(heatmap, "Movement Recommendations:", 
+                       (recommend_box_x1 + 10, recommend_box_y1 + 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Add recommendations
+            for i, recommendation in enumerate(movement_recommendations):
+                cv2.putText(heatmap, recommendation, 
+                           (recommend_box_x1 + 10, recommend_box_y1 + 50 + (i * 25)), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
         ret, buffer = cv2.imencode('.jpg', heatmap)
         heatmap_bytes = buffer.tobytes()
         
@@ -343,6 +504,15 @@ def video_feed():
 def heatmap_feed():
     return Response(generate_heatmap(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/zone_data')
+def zone_data():
+    """Return zone-specific data as JSON"""
+    return jsonify({
+        'zones': zones,
+        'total_people': total_people_count,
+        'recommendations': movement_recommendations
+    })
 
 @app.route('/heatmap_data')
 def heatmap_data():
@@ -411,6 +581,27 @@ def use_webcam():
     cap = cv2.VideoCapture(0)
     
     return redirect(url_for('home'))
+
+@app.route('/update_zones', methods=['POST'])
+def update_zones():
+    """Update zone configuration"""
+    global zones
+    
+    data = request.json
+    if data and 'zones' in data:
+        new_zones = data['zones']
+        # Validate and update zone configuration
+        for zone_id, zone_info in new_zones.items():
+            if zone_id in zones and 'coords' in zone_info:
+                # Update coordinates if provided
+                if all(0 <= x <= 1 for x in zone_info['coords']):
+                    zones[zone_id]['coords'] = zone_info['coords']
+                
+                # Update color if provided
+                if 'color' in zone_info and len(zone_info['color']) == 3:
+                    zones[zone_id]['color'] = zone_info['color']
+    
+    return jsonify({'success': True, 'zones': zones})
 
 if __name__ == "__main__":
     app.run(debug=True)

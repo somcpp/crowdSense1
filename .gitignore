@@ -1,0 +1,9 @@
+# Ignore virtual environment
+myenv/
+
+# Ignore uploads folder (usually used for user-uploaded content)
+uploads/
+
+# Ignore model file
+yolov8n.pt
+.vscode/
